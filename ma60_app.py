@@ -22,16 +22,23 @@ WATCHLIST_FILE = (
 
 
 @st.cache_data(ttl=86400)
-def get_all_taiwan_stock_symbols() -> list[str]:
-    """自動取得台灣上市/上櫃普通股代碼清單 (快取 1 天)"""
-    watch_list = []
+def get_stock_info_map() -> dict[str, str]:
+    """自動取得台灣上市/上櫃普通股代碼與名稱對照表 (快取 1 天)"""
+    stock_map = {}
     for code, info in twstock.codes.items():
         if info.type == "股票" and len(code) == 4:
             if info.market == "上市":
-                watch_list.append(f"{code}.TW")
+                stock_map[f"{code}.TW"] = info.name
             elif info.market == "上櫃":
-                watch_list.append(f"{code}.TWO")
-    return sorted(watch_list)
+                stock_map[f"{code}.TWO"] = info.name
+    return stock_map
+
+
+@st.cache_data(ttl=86400)
+def get_all_taiwan_stock_symbols() -> list[str]:
+    """取得股票代碼清單"""
+    stock_map = get_stock_info_map()
+    return sorted(list(stock_map.keys()))
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -78,12 +85,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def plot_stock_chart(symbol: str):
+def plot_stock_chart(symbol: str, stock_name: str = ""):
     """繪製 60 分鐘 K 線 + 布林通道 + 35/200MA 圖表"""
     try:
         df = yf.Ticker(symbol).history(period="15d", interval="60m")
         if df.empty or len(df) < 35:
-            st.warning(f"無法載入 {symbol} 的圖表資料。")
+            st.warning(f"無法載入 {symbol} {stock_name} 的圖表資料。")
             return
 
         df = calculate_indicators(df)
@@ -141,8 +148,9 @@ def plot_stock_chart(symbol: str):
                 )
             )
 
+        title_text = f"{symbol} {stock_name} 60m 走勢圖".strip()
         fig.update_layout(
-            title=f"{symbol} 60m 走勢圖",
+            title=title_text,
             xaxis_rangeslider_visible=False,
             height=420,
             margin=dict(l=10, r=10, t=35, b=10),
@@ -159,7 +167,6 @@ def plot_stock_chart(symbol: str):
 # ==================== 3. 側邊欄控制項 ====================
 st.sidebar.title("⚙️ 策略參數與濾網設定")
 
-# 1. 新增：UI 控制近5日成交量門檻
 st.sidebar.subheader("📊 流動性門檻")
 min_volume_threshold = st.sidebar.number_input(
     "近5日平均成交量下限 (張)",
@@ -205,6 +212,9 @@ use_macd_filter = st.sidebar.checkbox(
 use_kd_filter = st.sidebar.checkbox(
     "啟用 KD 濾網 (中低檔金叉且 K < 80)", value=False
 )
+
+# 取得股票名稱對照表
+stock_map = get_stock_info_map()
 
 # ==================== 4. 主頁面內容 ====================
 st.title("📈 台股 60m 糾結突破監控")
@@ -254,10 +264,9 @@ with tab1:
                             )
                         )
 
-                        # 使用 UI 控制的量能門檻
                         avg_vol_5d = (
                             df_s["Volume"].tail(5).mean() / 1000.0
-                        )  # yfinance 股數轉張數
+                        )  # 股數轉張數
                         if len(df_s) < 65 or avg_vol_5d < min_volume_threshold:
                             continue
 
@@ -308,6 +317,7 @@ with tab1:
                     watchlist_results.append(
                         {
                             "股票代碼": sym,
+                            "股票名稱": stock_map.get(sym, ""),
                             "最新收盤價": round(latest["Close"], 2),
                             "均線差距(%)": round(diff_pct, 2),
                             "布林頻寬(%)": round(latest["BB_BW"], 2),
@@ -397,10 +407,17 @@ with tab2:
                         )
 
                     # 綜合判定
-                    if cond_red and cond_vol and cond_break and cond_macd and cond_kd:
+                    if (
+                        cond_red
+                        and cond_vol
+                        and cond_break
+                        and cond_macd
+                        and cond_kd
+                    ):
                         breakout_results.append(
                             {
                                 "股票代碼": sym,
+                                "股票名稱": stock_map.get(sym, ""),
                                 "現價": round(close_price, 2),
                                 "爆量倍數": round(volume / vol_ma20, 2),
                                 "突破布林上軌": (
@@ -429,11 +446,22 @@ with tab2:
 
                 st.markdown("---")
                 st.subheader("📊 突破股票走勢圖檢視")
-                selected_symbol = st.selectbox(
+                
+                # 選項結合代碼與名稱，增強可讀性
+                options_map = {
+                    f"{item['股票代碼']} {item['股票名稱']}": (
+                        item["股票代碼"],
+                        item["股票名稱"],
+                    )
+                    for item in breakout_results
+                }
+                
+                selected_label = st.selectbox(
                     "選擇要查看 K 線圖的股票：",
-                    [item["股票代碼"] for item in breakout_results],
+                    list(options_map.keys()),
                 )
-                if selected_symbol:
-                    plot_stock_chart(selected_symbol)
+                if selected_label:
+                    sel_code, sel_name = options_map[selected_label]
+                    plot_stock_chart(sel_code, sel_name)
             else:
                 st.info("⌛ 目前無股票觸發帶量突破訊號。")
